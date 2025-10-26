@@ -8,17 +8,24 @@ import sys
 from typing import TextIO
 import random
 import datetime
+from collections.abc import Iterable
+from pathlib import Path
+import re
+
+SAFE_BUILTINS: dict[str, Any] = {
+    "abs": abs, "len": len, "int": int, "float": float, "str": str,
+    "round": round, "min": min, "max": max, "sum": sum,
+}
 
 
 class Vector:
     def __init__(self, elements: Sequence[Any] | None = None, dtype_=object):
         self.__dtype = dtype_
-        if self.__dtype is None:
-            self.__dtype = object
-
         self.size: int = 0
         self.capacity: int = 0
         self.data: NDArray[Any] = np.empty(0, dtype=dtype_)
+        if self.__dtype is None:
+            self.__dtype = object
         if elements is None:
             return
 
@@ -44,12 +51,14 @@ class Vector:
         ...
 
     def __getitem__(self, position: int | slice | tuple):
+        if isinstance(position, slice):
+            return self.data[:self.size][position]
         if isinstance(position, tuple):
             rows, col = position
             if isinstance(rows, slice) and rows == slice(None) and isinstance(col, int):
                 return np.array([self.data[i][col] for i in range(self.size)], dtype=self.__dtype)
             return self._as_matrix()[position]
-        return self.data[position]
+        return self.data[(self.size + position) % self.size]
 
     def __setitem__(self, position: int, value: Any):
         self.data[position] = value
@@ -94,7 +103,7 @@ class Vector:
         if self.size < self.capacity:
             return
         self.capacity = 2 * self.capacity + 1
-        new_data = np.full(self.capacity, dtype=self.__dtype)
+        new_data = np.empty(self.capacity, dtype=self.__dtype)
         for position in range(self.size):
             new_data[position] = self.data[position]
         self.data = new_data
@@ -111,12 +120,12 @@ class Vector:
 
 class ReadCSV:  # Vector(np.array(object))
     def __init__(self, filename: str | None = None):
+        self.translate: dict[str, int] = {}
+        self.table: Vector = Vector()
+        self.re_translate: Vector = Vector()
         if filename is None:
             return
 
-        self.translate: dict[str, int] = {}
-        self.table: Vector = Vector()  # TODO: менять размер в open и setCSVFILE.
-        self.re_translate: Vector = Vector()
 
         with open(filename) as csv_file:
             csv_reader = csv.reader(csv_file, delimiter=',')
@@ -155,16 +164,22 @@ class ReadCSV:  # Vector(np.array(object))
     def head(self, number_of_lines: int):
         if self.table.empty() or number_of_lines < 0:
             return None
-
         number_of_lines = min(number_of_lines, self.table.size)
-        return self.table[:number_of_lines].copy()
+        new_csv: ReadCSV = ReadCSV()
+        new_csv.table = Vector(self.table[:number_of_lines].copy())
+        new_csv.translate = self.translate
+        new_csv.re_translate = self.re_translate
+        return new_csv
 
     def tail(self, number_of_lines: int):
         if self.table.empty() or number_of_lines < 0:
             return None
-
         number_of_lines = min(number_of_lines, self.table.size)
-        return self.table[-number_of_lines:].copy()
+        new_csv: ReadCSV = ReadCSV()
+        new_csv.table = Vector(self.table[-number_of_lines:].copy())
+        new_csv.translate = self.translate
+        new_csv.re_translate = self.re_translate
+        return new_csv
 
     def getColumnNames(self):
         if not self.translate:
@@ -230,7 +245,8 @@ class ReadCSV:  # Vector(np.array(object))
             for row in range(num_rows):
                 self.table[row][col] = casted_col[row]
 
-def python_sort_column(csv: ReadCSV, column_number_: int | str | None) -> ReadCSV | None:
+def python_sort_column(csv: ReadCSV, column_number_: int | str | None, needed_type: int | str | None = None,
+                       key: Callable[[Any], Any] | None = None) -> ReadCSV | None:
     new_csv: ReadCSV = ReadCSV()
     if column_number_ is None:
         new_csv.translate = csv.translate
@@ -260,6 +276,11 @@ def python_sort_column(csv: ReadCSV, column_number_: int | str | None) -> ReadCS
         column: list = list()
         for row_number in range(len(csv.table)):
             column.append(csv.table[row_number][column_number_])
+
+        if needed_type is not None:
+            for el in column:
+                el = needed_type(el)
+
         column = list(sorted(column))
         for row_number in range(len(csv.table)):
             new_row: NDArray[Any] = np.empty(1, dtype=object)
@@ -272,10 +293,10 @@ def medianByColumn(csv: ReadCSV, column: str | int) -> float:
     our_column = python_sort_column(csv, column)
     ans = 0.0
     if len(our_column.table) % 2 != 0:
-        ans = our_column.table[len(our_column.table) // 2]
+        ans = our_column.table[len(our_column.table) // 2][0]
     else:
-        ans = (our_column.table[len(len(our_column.table) // 2) - 1] + our_column.table[
-            len(len(our_column.table) // 2)]) / 2
+        ans = (our_column.table[len(our_column.table) // 2 - 1][0] + our_column.table[len(our_column.table) // 2][
+            0]) / 2
     return ans
 
 
@@ -304,31 +325,57 @@ RANDOM_NAMES = ["Patrick Star", "SpongeBob SquarePants", "Squidward Tentacles", 
                 "Potty the Parrot", "Mermaid Man", "Barnacle Boy", "The Flying Dutchman", "Larry the Lobster"]
 
 class User:
-    def __init__(self, new_username: str | None = None, new_csv: ReadCSV | None = None,  csv_name: str | None = None):
-        if new_username is None:
-            new_username = ""
+    def __init__(self, new_username: str | None = None):
         self.username = new_username
         self.all_csv: dict[str, ReadCSV] = {}
-        if new_csv is None:
-            return
-        if csv_name is None:
-            csv_name = "default_1"
-        self.all_csv[csv_name] = new_csv
 
-    def add(self, new_csv: ReadCSV | None = None,  csv_name: str | None = None) -> str | None:
-        if new_csv is None:
+    def add_csv(self, csv_path: str | None = None,  csv_name: str | None = None) -> str | None:
+        if csv_path is None:
             return None
-        if csv_name is None:
+        if csv_name is None or csv_name == "":
             csv_name = f"default_{len(self.all_csv) + 1}"
         if csv_name in self.all_csv:
             return NAME_EXISTS
-        self.all_csv[csv_name] = new_csv
-        return None
+        self.all_csv[csv_name] = ReadCSV(csv_path)
+        return csv_name
 
     def all_csv_names(self) -> list[str] | None:
         if self.all_csv is None:
             return None
         return list(self.all_csv.keys())
+
+    @staticmethod
+    def compileNamedKey(name: str, expression: str) -> Callable[[Any], Any]:
+        if not re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")(expression):
+            raise ValueError("Invalid name of the key >:(")
+        src = f"def {name}(x):\n    return {expression}\n"
+        local_names: dict[str, Any] = {}
+        exec(src, {"__builtins__": SAFE_BUILTINS}, local_names)
+        return local_names[name]
+
+class Root:
+    def __init__(self, all_names: Iterable[str] | None = None) -> None:
+        self.names: dict[str, User] = {}
+        if all_names is None:
+            return
+        for name in all_names:
+            self.names[name] = User(name)
+
+    def add_user(self, new_user: str | None = None) -> str:
+        if new_user is None or new_user == "":
+            new_user = RANDOM_NAMES[random.randint(0, len(RANDOM_NAMES) - 1)] + datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+        self.names[new_user] = User(new_user)
+        return new_user
+
+    def all_user_names(self) -> list[str]:
+        return list(self.names.keys())
+
+    def get_user(self, name: str) -> User:
+        return self.names[name]
+
+    def name_exists(self, name: str) -> bool:
+        return name in self.names
+
 
 documentation_path = "./documentation.txt"
 
@@ -336,17 +383,20 @@ PROMPT = ">>> "
 
 GREETINGS = """Hello! What would you like to do?\n(You can try command \"documentation\")"""
 
-USER_NAME_NOT_EXISTS = "A user with that name does not exist."
+USER_NAME_NOT_EXISTS = "A user with that name does not exist"
 
-INCORRECT_PATH = "Incorrect path provided."
+INCORRECT_PATH = "Incorrect path provided"
 
-INCORRECT_TRANSITION = "Incorrect transition."
+INCORRECT_TRANSITION = "Incorrect transition"
 
-UNKNOWN_COMMAND = "I'm sorry, I couldn't understand the command."
+UNKNOWN_COMMAND = "I'm sorry, I couldn't understand the command"
 
-INCORRECT_DIRECTORY = "Incorrect directory for creating a new user."
+INCORRECT_DIRECTORY = "Incorrect directory for creating a new user"
 
 INVALID_PREFIX = "I'm sorry, but the username cannot begin with the characters . or /"
+
+CSV_IN_ROOT = "I'm sorry, but add csv cannot be used in the root directory"
+
 
 def write_into(output: TextIO | None = sys.stdout, user_name: str | None = "sudo", prefix: str | None = "") -> None:
     if output is None:
@@ -405,10 +455,10 @@ def normalize_path(path: str) -> str:
         return "/" + "/".join(norm_path)
     return "/".join(norm_path)
 
-
 def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
-    all_users: dict[str, User] = {"sudo": User()}
+    root: Root = Root()
     user_now: str = "sudo"
+    root.add_user(user_now)
     write_into(output, user_now, GREETINGS)
     all_commands: list = inp.readline().rstrip("\r\n").split() or ["" for _ in range(1)]
     exit_words: set[str] = set()
@@ -419,13 +469,13 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
         if len(all_commands) == 1:
             if all_commands[0].lower() == "ls":
                 if user_now == "":
-                   prefix = "\n".join(all_users.keys())
+                   prefix = "\n".join(root.all_user_names())
                 else:
-                    prefix = "\n".join(all_users[user_now].all_csv_names())
+                    prefix = "\n".join(root.get_user(user_now).all_csv_names())
             elif all_commands[0] == "documentation":
                 print_txt(documentation_path, output)
             elif all_commands[0] != "":
-                prefix = "I'm sorry, I didn't understand the command."
+                prefix = UNKNOWN_COMMAND
         elif all_commands[0].lower() == "cd":
             norm_path: str = normalize_path(all_commands[1])
             flag: bool = True
@@ -435,35 +485,31 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                     flag = False
                     break
                 position += 1
+            all_user_name: str = norm_path[position:]
+            if all_user_name == "":
+                all_user_name += " ".join(all_commands[2:])
+            elif len(all_commands) > 2:
+                all_user_name += " " + " ".join(all_commands[2:])
             if not flag:
                 prefix = INCORRECT_PATH
             elif norm_path[:position] == "/":
-                all_user_name: str = norm_path[position:]
-                if len(all_commands) > 2:
-                    all_user_name += " " + " ".join(all_commands[2:])
                 if all_user_name == "":
                     user_now = ""
-                elif all_user_name not in all_users:
+                elif not root.name_exists(all_user_name):
                     prefix = USER_NAME_NOT_EXISTS
                 else:
                     user_now = all_user_name
             elif len(norm_path[:position]) >= 2 and norm_path[:position] != "./":
-                all_user_name: str = norm_path[position:]
-                if len(all_commands) > 2:
-                    all_user_name += " " + " ".join(all_commands[2:])
                 if all_user_name == "":
                     user_now = ""
-                elif all_user_name == "" or all_user_name not in all_users:
+                elif not root.name_exists(all_user_name):
                     prefix = USER_NAME_NOT_EXISTS
                 else:
                     user_now = all_user_name
-            elif position == 0 or (norm_path[:position] == "./" and len(norm_path) > 2):
-                all_user_name: str = norm_path
-                if len(all_commands) > 2:
-                    all_user_name += " " + " ".join(all_commands[2:])
+            elif position == 0 or (len(norm_path) > 2 and norm_path[:position] == "./"):
                 if user_now != "":
                     prefix = INCORRECT_TRANSITION
-                elif all_user_name not in all_users:
+                elif not root.name_exists(all_user_name):
                     prefix = USER_NAME_NOT_EXISTS
                 else:
                     user_now = all_user_name
@@ -474,21 +520,62 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                 all_user_name: str = " ".join(all_commands[2:])
                 if user_now != "":
                     prefix = INCORRECT_DIRECTORY
-                elif all_user_name in all_users:
+                elif root.name_exists(all_user_name):
                     prefix = NAME_EXISTS
                 else:
-                    if all_user_name == "":
-                        all_user_name = RANDOM_NAMES[random.randint(0, len(RANDOM_NAMES) - 1)] + datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
-                    if all_user_name[0] == "." or all_user_name[0] == "/":
+                    if len(all_user_name) >= 1 and (all_user_name[0] == "." or all_user_name[0] == "/"):
                         prefix = INVALID_PREFIX
                     else:
-                        all_users[all_user_name] = User()
+                        all_user_name = root.add_user(all_user_name)
                         prefix = f"Add new user {all_user_name}"
             elif all_commands[1].lower() == "csv":
-                pass
-
-
-
+                position: int = 2
+                all_path: str = ""
+                all_csv_name: str = ""
+                while position < len(all_commands) and all_commands[position][:7] != "--name=":
+                    all_path += all_commands[position]
+                    position += 1
+                if position < len(all_commands):
+                    all_csv_name = all_commands[position][7:]
+                    if all_csv_name == "":
+                        all_csv_name += " ".join(all_commands[position + 1:])
+                    elif position + 1 < len(all_commands):
+                        all_csv_name += " " + " ".join(all_commands[position + 1:])
+                norm_path: str = normalize_path(all_path)
+                if all_path == "":
+                    norm_path = "./homework_oop/repositories.csv"
+                path = Path(norm_path).expanduser()
+                if not path.is_file():
+                    prefix = INCORRECT_PATH
+                elif user_now == "":
+                    prefix = CSV_IN_ROOT
+                else:
+                    all_csv_name = root.get_user(user_now).add_csv(norm_path, all_csv_name)
+                    if all_csv_name == NAME_EXISTS:
+                        prefix = NAME_EXISTS
+                    else:
+                        prefix = f"Add new csv file {all_csv_name} to the user {user_now}"
+        elif all_commands[0].lower == "key":
+            sub = all_commands[1] if len(all_commands) > 1 else ""
+            if user_now:
+                current_user = root.get_user(user_now)
+                if sub == "create":
+                    if len(all_commands) != 3:
+                        prefix = "Usage: key create <key_name>"
+                    else:
+                        try:
+                            key_name = all_commands[2]
+                            output.write("def foo(x):\n    return ")
+                            output.flush()
+                            expression = inp.readline().rstrip("\r\n")
+                            new_key_function = User.compileNamedKey(key_name, expression)
+                            current_user.sort_keys[key_name] = new_key_function
+                        except Exception as exception:
+                            prefix = f"Key compile error: {exception}"
+            else:
+                prefix = "Incorrect directory for the key command!"
+        else:
+            prefix = UNKNOWN_COMMAND
 
 
 
@@ -507,8 +594,10 @@ def main():
     with open("log.txt", "w") as log:
         log.write("")
     #wow = ReadCSV("./homework_oop/repositories.csv")
+    #print(wow.tail(10).table)
     #print(wow.getColumnByName("Forks"))
     terminal()
+
 
 
 if __name__ == "__main__":
