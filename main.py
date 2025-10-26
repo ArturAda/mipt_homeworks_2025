@@ -19,6 +19,12 @@ SAFE_BUILTINS: dict[str, Any] = {
     "round": round, "min": min, "max": max, "sum": sum,
 }
 
+_TYPE_MAP: dict[str, Callable[[Any], Any]] = {
+    "int": int,
+    "float": float,
+    "str": str,
+}
+
 
 class Vector:
     def __init__(self, elements: Sequence[Any] | None = None, dtype_=object):
@@ -127,8 +133,6 @@ class ReadCSV:  # Vector(np.array(object))
         self.re_translate: Vector = Vector()
         if filename is None:
             return
-
-
         with open(filename) as csv_file:
             csv_reader = csv.reader(csv_file, delimiter=',')
             for line_index, row in enumerate(csv_reader):
@@ -169,8 +173,8 @@ class ReadCSV:  # Vector(np.array(object))
         number_of_lines = min(number_of_lines, self.table.size)
         new_csv: ReadCSV = ReadCSV()
         new_csv.table = Vector(self.table[:number_of_lines].copy())
-        new_csv.translate = self.translate
-        new_csv.re_translate = self.re_translate
+        new_csv.translate = self.translate.copy()
+        new_csv.re_translate = self.re_translate.copy()
         return new_csv
 
     def tail(self, number_of_lines: int):
@@ -247,58 +251,49 @@ class ReadCSV:  # Vector(np.array(object))
             for row in range(num_rows):
                 self.table[row][col] = casted_col[row]
 
-def python_sort_column(csv: ReadCSV, column_number_: int | str | None, needed_type: int | str | None = None,
+
+def python_sort_column(csv: ReadCSV, column_number: int | str, needed_type: int | float | str | None = None,
                        key: Callable[[Any], Any] | None = None) -> ReadCSV | None:
     new_csv: ReadCSV = ReadCSV()
-    if column_number_ is None:
-        new_csv.translate = csv.translate
-        all_columns: list[list] = list()
-        for row_number in range(len(csv.table)):
-            for column_number in range(len(csv.table[row_number])):
-                if row_number == 0:
-                    all_columns.append([[] for _ in range(len(csv.table))])
-                all_columns[column_number][row_number] = csv.table[row_number][column_number]
-        for column_number in range(len(all_columns)):
-            all_columns[column_number] = list(sorted(all_columns[column_number]))
-        for row_number in range(len(csv.table)):
-            new_row: NDArray[Any] = np.empty(len(csv.table[row_number]), dtype=object)
-            for column_number in range(len(csv.table[row_number])):
-                new_row[column_number] = all_columns[column_number][row_number]
-            new_csv.table.append(new_row)
+
+    new_csv.translate = csv.translate.copy()
+    new_csv.re_translate = csv.re_translate.copy()
+
+    if isinstance(column_number, int):
+        needed_column_index = column_number
     else:
-        if type(column_number_) is str:
-            if column_number_ not in csv.translate:
-                return None
-            column_number_ = csv.translate[column_number_]
-        if column_number_ >= len(csv.translate):
-            return None
-        name_column: str = csv.re_translate[column_number_]
-        new_csv.translate[name_column] = 0
-        new_csv.re_translate.append(name_column)
-        column: list = list()
-        for row_number in range(len(csv.table)):
-            column.append(csv.table[row_number][column_number_])
+        needed_column_index = csv.translate[column_number]
 
+    def our_key(idx: int):
+        value = csv.table[idx][needed_column_index]
         if needed_type is not None:
-            for el in column:
-                el = needed_type(el)
+            value = needed_type(value)
+        return key(value) if key is not None else value
 
-        column = list(sorted(column))
-        for row_number in range(len(csv.table)):
-            new_row: NDArray[Any] = np.empty(1, dtype=object)
-            new_row[0] = column[row_number]
-            new_csv.table.append(new_row)
+    indices = list(range(len(csv.table)))
+    indices.sort(key=our_key)
+
+    for idx in indices:
+        cur_row = csv.table[idx].copy()
+        new_csv.table.append(cur_row)
+
     return new_csv
 
 
 def medianByColumn(csv: ReadCSV, column: str | int) -> float:
     our_column = python_sort_column(csv, column)
     ans = 0.0
-    if len(our_column.table) % 2 != 0:
-        ans = our_column.table[len(our_column.table) // 2][0]
+    if isinstance(column, int):
+        needed_column = column
     else:
-        ans = (our_column.table[len(our_column.table) // 2 - 1][0] + our_column.table[len(our_column.table) // 2][
-            0]) / 2
+        needed_column = csv.translate[column]
+
+    if len(our_column.table) % 2 != 0:
+        ans = our_column.table[len(our_column.table) // 2][needed_column]
+    else:
+        ans = (our_column.table[len(our_column.table) // 2 - 1][needed_column] +
+               our_column.table[len(our_column.table) // 2][
+                   needed_column]) / 2
     return ans
 
 
@@ -321,17 +316,22 @@ class GroupingAndSorting:
             read_csv = operation(read_csv)
         return read_csv
 
+
 NAME_EXISTS = "This name is already exists"
-RANDOM_NAMES = ["Patrick Star", "SpongeBob SquarePants", "Squidward Tentacles", "Eugene H. Krabs", "Sheldon J. Plankton",
+RANDOM_NAMES = ["Patrick Star", "SpongeBob SquarePants", "Squidward Tentacles", "Eugene H. Krabs",
+                "Sheldon J. Plankton",
                 "Karen Plankton", "Sandy Cheeks", "Mrs. Puff", "Pearl Krabs", "Gary the Snail", "Patchy the Pirate",
                 "Potty the Parrot", "Mermaid Man", "Barnacle Boy", "The Flying Dutchman", "Larry the Lobster"]
 
+
 class User:
-    def __init__(self, new_username: str | None = None):
+    def __init__(self, new_username: str = ""):
         self.username = new_username
         self.all_csv: dict[str, ReadCSV] = {}
+        self.sort_keys: dict[str, Callable[[Any], Any]] = {}
+        self.key_name_to_source: dict[str, str] = {}
 
-    def add_csv(self, csv_path: str | None = None,  csv_name: str | None = None) -> str | None:
+    def add_csv(self, csv_path: str | None = None, csv_name: str | None = None) -> str | None:
         if csv_path is None:
             return None
         if csv_name is None or csv_name == "":
@@ -361,16 +361,15 @@ class User:
             return
         del self.all_csv[csv_name]
 
-
-
     @staticmethod
     def compileNamedKey(name: str, expression: str) -> Callable[[Any], Any]:
-        if not re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")(expression):
+        if not re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$").match(name):
             raise ValueError("Invalid name of the key >:(")
         src = f"def {name}(x):\n    return {expression}\n"
         local_names: dict[str, Any] = {}
         exec(src, {"__builtins__": SAFE_BUILTINS}, local_names)
         return local_names[name]
+
 
 class Root:
     def __init__(self, all_names: Iterable[str] | None = None) -> None:
@@ -382,9 +381,15 @@ class Root:
 
     def add_user(self, new_user: str | None = None) -> str:
         if new_user is None or new_user == "":
-            new_user = RANDOM_NAMES[random.randint(0, len(RANDOM_NAMES) - 1)] + datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+            new_user = RANDOM_NAMES[random.randint(0, len(RANDOM_NAMES) - 1)] + datetime.datetime.now().strftime(
+                "%Y%m%d%H%M%S%f")
         self.names[new_user] = User(new_user)
         return new_user
+
+    def del_user(self, user_name: str | None = None) -> None:
+        if user_name is None or user_name not in self.names:
+            return
+        del self.names[user_name]
 
     def all_user_names(self) -> list[str]:
         return list(self.names.keys())
@@ -399,21 +404,22 @@ class Root:
         self.names.clear()
 
 
+
 documentation_path = "./documentation.txt"
 
 PROMPT = ">>> "
 
 GREETINGS = """Hello! What would you like to do?\n(You can try command \"documentation\")"""
 
-USER_NAME_NOT_EXISTS = "A user with that name does not exist"
+USER_NAME_NOT_EXISTS = "A user with that name does not exist."
 
-INCORRECT_PATH = "Incorrect path provided"
+INCORRECT_PATH = "Incorrect path provided."
 
-INCORRECT_TRANSITION = "Incorrect transition"
+INCORRECT_TRANSITION = "Incorrect transition."
 
-UNKNOWN_COMMAND = "I'm sorry, I couldn't understand the command"
+UNKNOWN_COMMAND = "I'm sorry, I couldn't understand the command."
 
-INCORRECT_DIRECTORY = "Incorrect directory for creating a new user"
+INCORRECT_DIRECTORY = "Incorrect directory for creating a new user."
 
 INVALID_PREFIX = "I'm sorry, but the username cannot begin with the characters . or /"
 
@@ -435,6 +441,7 @@ def write_into(output: TextIO | None = sys.stdout, user_name: str | None = "sudo
     all_output += f"(./{user_name}) " + PROMPT
     output.write(all_output)
     output.flush()
+
 
 def print_txt(path: str, output: TextIO = sys.stdout, encoding: str = "utf-8") -> None:
     chunk_size: int = 1 << 16
@@ -479,6 +486,7 @@ def normalize_path(path: str) -> str:
         return "/" + "/".join(norm_path)
     return "/".join(norm_path)
 
+
 def save_as_csv(read_csv: ReadCSV, path: str, delimiter: str = ",", write_header: bool = True) -> None:
     real_path: Path = Path(path)
     real_path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,6 +496,7 @@ def save_as_csv(read_csv: ReadCSV, path: str, delimiter: str = ",", write_header
             out.writerow(list(read_csv.re_translate.array()))
         out.writerows(read_csv.table.array())
 
+
 def _pyify(x):
     if isinstance(x, np.generic):
         return x.item()
@@ -495,7 +504,9 @@ def _pyify(x):
         return x.tolist()
     return x
 
-def save_as_json(read_csv: ReadCSV, path: str, orient: str = "records", ensure_ascii: bool = False, indent: int | None = 2) -> None:
+
+def save_as_json(read_csv: ReadCSV, path: str, orient: str = "records", ensure_ascii: bool = False,
+                 indent: int | None = 2) -> None:
     real_path: Path = Path(path)
     real_path.parent.mkdir(parents=True, exist_ok=True)
     rows = read_csv.table.array()
@@ -508,7 +519,7 @@ def save_as_json(read_csv: ReadCSV, path: str, orient: str = "records", ensure_a
         with open(real_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=ensure_ascii, indent=indent)
     elif orient == "split":
-        payload = { "columns": header, "data": [[_pyify(v) for v in row] for row in rows] }
+        payload = {"columns": header, "data": [[_pyify(v) for v in row] for row in rows]}
         with open(real_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=ensure_ascii, indent=indent)
     elif orient == "jsonl":
@@ -517,7 +528,9 @@ def save_as_json(read_csv: ReadCSV, path: str, orient: str = "records", ensure_a
                 rec = {header[i]: _pyify(row[i]) for i in range(min(amount_of_columns, len(row)))}
                 f.write(json.dumps(rec, ensure_ascii=ensure_ascii) + "\n")
 
-def get_all_names(position: int, all_commands: list[str], all_csv_names: list[str], current_user: User) -> tuple[str, int]:
+
+def get_all_names(position: int, all_commands: list[str], all_csv_names: list[str], current_user: User) -> tuple[
+    str, int]:
     last_csv_name: str = ""
     flag: bool = False
     while position < len(all_commands) and all_commands[position][:9] != "--format=":
@@ -546,6 +559,7 @@ def get_all_names(position: int, all_commands: list[str], all_csv_names: list[st
             all_csv_names.append(user_name)
     return ("", position)
 
+
 def get_format(position: int, all_commands: list[str]) -> str:
     current_format: str = ".csv"
     if position < len(all_commands) and all_commands[position][:9] == "--format=":
@@ -557,6 +571,7 @@ def get_format(position: int, all_commands: list[str]) -> str:
         if current_format != ".csv" and current_format != ".json":
             return f"I\'m sorry, but I cannot work with the {current_format} format"
     return current_format
+
 
 def save_current_user(root: Root, user_name: str, all_commands: list[str]) -> str:
     current_user: User = root.get_user(user_name)
@@ -576,6 +591,7 @@ def save_current_user(root: Root, user_name: str, all_commands: list[str]) -> st
         else:
             save_as_json(current_user.get_csv(csv_name), all_csv_path)
     return ""
+
 
 def delete_current_user(root: Root, user_name: str, all_commands: list[str], real_del: bool = False) -> str:
     current_user: User = root.get_user(user_name)
@@ -597,6 +613,57 @@ def delete_current_user(root: Root, user_name: str, all_commands: list[str], rea
             Path(csv_path).unlink(missing_ok=True)
     return ""
 
+
+def parse_sort_args(argline: str) -> dict[str, Any]:
+    """
+    Поддерживаем:
+      --column <name|index>   (обязательно)
+      --using  <key_name>     (опционально)
+      --type   <int|float|str>  (опционально)
+      --out    <new_csv_name> (обязательно)
+    Возвращает словарь параметров для python_sort_column
+    """
+    tokens = argline.split()
+    i = 0
+    result: dict[str, Any] = {}
+
+    def need_value(flag: str):
+        nonlocal i
+        if i + 1 >= len(tokens):
+            raise ValueError(f"Flag {flag} requires a value")
+        v = tokens[i + 1]
+        i += 2
+        return v
+
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--column":
+            v = need_value("--column")
+            try:
+                result["column_number"] = int(v)
+            except ValueError:
+                result["column_number"] = v
+        elif t == "--using":
+            result["--using"] = need_value("--using")
+        elif t == "--type":
+            v = need_value("--type").lower()
+            if v not in _TYPE_MAP:
+                raise ValueError(f"Unknown type: {v}")
+            result["needed_type"] = _TYPE_MAP[v]
+        elif t == "--out":
+            result["--out"] = need_value("--out")
+        else:
+            raise ValueError(f"Unknown argument: {t}")
+
+    if "column_number" not in result:
+        raise ValueError("Missing required --column")
+    if "--out" not in result or not result["--out"]:
+        raise ValueError("Missing required --out <new_csv_name>")
+    if "needed_type" not in result:
+        result["needed_type"] = None
+    return result
+
+
 def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
     root: Root = Root()
     user_now: str = "sudo"
@@ -613,7 +680,7 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                 prefix = save_current_user(root, user_now, all_commands)
                 if prefix == "":
                     prefix = "Successful preservation"
-            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+            elif len(all_commands) > 1 and all_commands[1] == "all":
                 new_all_commands: list[str] = ["save", "--format=.csv"]
                 current_format: str = ".csv"
                 if len(all_commands) > 2 and all_commands[2][:9] == "--format=":
@@ -637,30 +704,42 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                 prefix = delete_current_user(root, user_now, all_commands)
                 if prefix == "":
                     prefix = "Successful deletion"
-            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+            elif len(all_commands) == 1 or (len(all_commands) >= 2 and all_commands[1] == "--all"):
                 new_all_commands: list[str] = ["delete"]
                 for user_name in root.all_user_names():
                     prefix = delete_current_user(root, user_name, new_all_commands)
                 root.clear()
                 prefix = "Successful deletion"
             else:
-                prefix = UNKNOWN_COMMAND
+                all_user_name: str = " ".join(all_commands[1:])
+                if not root.name_exists(all_user_name):
+                    prefix = USER_NAME_NOT_EXISTS
+                else:
+                    root.del_user(all_user_name)
+                    prefix = "Successful deletion"
         elif all_commands[0].lower() == "rdelete":
             if user_now != "":
                 prefix = delete_current_user(root, user_now, all_commands, True)
                 if prefix == "":
                     prefix = "Successful rdeletion"
-            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+            elif len(all_commands) == 1 or (len(all_commands) >= 2 and all_commands[1].lower() == "--all"):
                 root_path: Path = Path(ROOT_PATH)
                 if root_path.exists():
                     shutil.rmtree(str(root_path))
                 prefix = "Successful rdeletion"
             else:
-                prefix = UNKNOWN_COMMAND
+                all_user_name: str = " ".join(all_commands[1:])
+                if not root.name_exists(all_user_name):
+                    prefix = USER_NAME_NOT_EXISTS
+                else:
+                    root_path: Path = Path(ROOT_PATH + "/" + all_user_name)
+                    if root_path.exists():
+                        shutil.rmtree(str(root_path))
+                    prefix = "Successful deletion"
         elif len(all_commands) == 1:
             if all_commands[0].lower() == "ls":
                 if user_now == "":
-                   prefix = "\n".join(root.all_user_names())
+                    prefix = "\n".join(root.all_user_names())
                 else:
                     prefix = "\n".join(root.get_user(user_now).all_csv_names())
             elif all_commands[0] == "documentation":
@@ -672,7 +751,8 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
             flag: bool = True
             position: int = 0
             while position < len(norm_path) and norm_path[position] in {".", "/"}:
-                if position >= 2 and norm_path[position - 2] == "." and norm_path[position - 1] == "." and norm_path[position] == ".":
+                if position >= 2 and norm_path[position - 2] == "." and norm_path[position - 1] == "." and norm_path[
+                    position] == ".":
                     flag = False
                     break
                 position += 1
@@ -746,8 +826,6 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                         prefix = NAME_EXISTS
                     else:
                         prefix = f"Add new csv file {all_csv_name} to the user {user_now}"
-            else:
-                prefix = UNKNOWN_COMMAND
         elif all_commands[0].lower() == "key":
             sub = all_commands[1] if len(all_commands) > 1 else ""
             if user_now:
@@ -758,36 +836,81 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                     else:
                         try:
                             key_name = all_commands[2]
-                            output.write("def foo(x):\n    return ")
+                            output.write(f"def {key_name}(x):\n    return ")
                             output.flush()
                             expression = inp.readline().rstrip("\r\n")
                             new_key_function = User.compileNamedKey(key_name, expression)
+                            src = f"def {key_name}(x):\n    return {expression}"
                             current_user.sort_keys[key_name] = new_key_function
+                            current_user.key_name_to_source[key_name] = src
                         except Exception as exception:
                             prefix = f"Key compile error: {exception}"
+                elif sub == "list":
+                    if len(all_commands) != 2:
+                        prefix = "Usage: key list"
+                    else:
+                        to_output = []
+                        for name in sorted(current_user.sort_keys):
+                            to_output.append(current_user.key_name_to_source[name])
+                        prefix = "\n".join(to_output)
             else:
-                prefix = "Incorrect directory for the key command!"
+                prefix = "Incorrect directory for such a command!"
+        elif all_commands[0].lower() == "sort":
+            rest = " ".join(all_commands)[len("sort"):].strip()
+            if "|" not in rest:
+                prefix = "Usage: sort <csv_name> | --column <name|index> [--using <key>] [--type <int|float|str>] --out <new_csv_name>"
+            else:
+                left, right = rest.split("|", 1)
+                csv_name = left.strip()
+                args_str = right.strip()
+
+                if user_now == "":
+                    prefix = CSV_IN_ROOT
+                elif not csv_name:
+                    prefix = "CSV name is empty."
+                elif csv_name not in root.get_user(user_now).all_csv:
+                    prefix = f"CSV '{csv_name}' not found."
+                else:
+                    try:
+                        params = parse_sort_args(args_str)
+                        current_user = root.get_user(user_now)
+
+                        new_name = params["--out"]
+                        if new_name in current_user.all_csv:
+                            raise ValueError(f"CSV '{new_name}' already exists")
+
+                        kwargs = {
+                            "column_number": params["column_number"],
+                            "needed_type": params.get("needed_type"),
+                            "key": None
+                        }
+
+                        if "--using" in params:
+                            key_name = params["--using"]
+                            key_func = current_user.sort_keys.get(key_name)
+                            if key_func is None:
+                                raise ValueError(f"No such key: {key_name}")
+                            kwargs["key"] = key_func
+
+                        res = python_sort_column(current_user.all_csv[csv_name], **kwargs)
+                        if res is None:
+                            prefix = "Sort failed."
+                        else:
+                            current_user.all_csv[new_name] = res
+                            prefix = f"Created CSV '{new_name}'"
+                    except Exception as e:
+                        prefix = f"Sort error: {e}"
+
         else:
             prefix = UNKNOWN_COMMAND
-
-
         write_into(output, user_now, prefix)
         all_commands = inp.readline().rstrip("\r\n").split() or ["" for _ in range(1)]
 
 
 def main():
-    """
-    our_csv = ReadCSV("./homework_oop/repositories.csv")
-    print(our_csv.getColumnNames())
-    """
-    with open("log.txt", "w") as log:
-        log.write("")
-    #wow = ReadCSV("./homework_oop/repositories.csv")
-    #print(wow.tail(10).table)
-    #print(wow.getColumnByName("Forks"))
     terminal()
-
 
 
 if __name__ == "__main__":
     main()
+
