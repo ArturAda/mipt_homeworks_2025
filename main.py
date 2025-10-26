@@ -10,6 +10,8 @@ import random
 import datetime
 from collections.abc import Iterable
 from pathlib import Path
+import json
+import shutil
 import re
 
 SAFE_BUILTINS: dict[str, Any] = {
@@ -344,6 +346,23 @@ class User:
             return None
         return list(self.all_csv.keys())
 
+    def get_csv(self, csv_name: str | None = None) -> ReadCSV | None:
+        if csv_name is None or csv_name not in self.all_csv:
+            return None
+        return self.all_csv[csv_name]
+
+    def csv_file_exists(self, csv_name: str | None = None) -> bool:
+        if csv_name is None or csv_name not in self.all_csv:
+            return False
+        return True
+
+    def del_csv(self, csv_name: str | None = None) -> None:
+        if csv_name is None or csv_name not in self.all_csv:
+            return
+        del self.all_csv[csv_name]
+
+
+
     @staticmethod
     def compileNamedKey(name: str, expression: str) -> Callable[[Any], Any]:
         if not re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")(expression):
@@ -376,6 +395,9 @@ class Root:
     def name_exists(self, name: str) -> bool:
         return name in self.names
 
+    def clear(self) -> None:
+        self.names.clear()
+
 
 documentation_path = "./documentation.txt"
 
@@ -396,6 +418,8 @@ INCORRECT_DIRECTORY = "Incorrect directory for creating a new user"
 INVALID_PREFIX = "I'm sorry, but the username cannot begin with the characters . or /"
 
 CSV_IN_ROOT = "I'm sorry, but add csv cannot be used in the root directory"
+
+ROOT_PATH = "./root"
 
 
 def write_into(output: TextIO | None = sys.stdout, user_name: str | None = "sudo", prefix: str | None = "") -> None:
@@ -455,6 +479,124 @@ def normalize_path(path: str) -> str:
         return "/" + "/".join(norm_path)
     return "/".join(norm_path)
 
+def save_as_csv(read_csv: ReadCSV, path: str, delimiter: str = ",", write_header: bool = True) -> None:
+    real_path: Path = Path(path)
+    real_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(real_path, "w", encoding="utf-8") as f:
+        out = csv.writer(f, delimiter=delimiter)
+        if write_header and not read_csv.re_translate.empty():
+            out.writerow(list(read_csv.re_translate.array()))
+        out.writerows(read_csv.table.array())
+
+def _pyify(x):
+    if isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    return x
+
+def save_as_json(read_csv: ReadCSV, path: str, orient: str = "records", ensure_ascii: bool = False, indent: int | None = 2) -> None:
+    real_path: Path = Path(path)
+    real_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = read_csv.table.array()
+    header = list(read_csv.re_translate.array()) if not read_csv.re_translate.empty() else []
+    amount_of_columns: int = len(rows[0]) if len(rows) else 0
+    if not header:
+        header = [str(i) for i in range(amount_of_columns)]
+    if orient == "records":
+        payload = [{header[i]: _pyify(row[i]) for i in range(min(amount_of_columns, len(row)))} for row in rows]
+        with open(real_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=ensure_ascii, indent=indent)
+    elif orient == "split":
+        payload = { "columns": header, "data": [[_pyify(v) for v in row] for row in rows] }
+        with open(real_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=ensure_ascii, indent=indent)
+    elif orient == "jsonl":
+        with open(real_path, "w", encoding="utf-8") as f:
+            for row in rows:
+                rec = {header[i]: _pyify(row[i]) for i in range(min(amount_of_columns, len(row)))}
+                f.write(json.dumps(rec, ensure_ascii=ensure_ascii) + "\n")
+
+def get_all_names(position: int, all_commands: list[str], all_csv_names: list[str], current_user: User) -> tuple[str, int]:
+    last_csv_name: str = ""
+    flag: bool = False
+    while position < len(all_commands) and all_commands[position][:9] != "--format=":
+        if all_commands[position][:8] == "--names=":
+            if last_csv_name != "" or flag:
+                return (UNKNOWN_COMMAND, position)
+            last_csv_name += all_commands[position][8:]
+            flag = True
+        else:
+            last_csv_name += all_commands[position]
+        if len(last_csv_name) > 0 and last_csv_name[-1] == ",":
+            add_csv_name: str = last_csv_name[:-1]
+            if not current_user.csv_file_exists(add_csv_name):
+                return (f"Name {add_csv_name} doesn't exist", position)
+            all_csv_names.append(add_csv_name)
+            last_csv_name = ""
+        position += 1
+    if last_csv_name != "" and last_csv_name != ".":
+        if not flag:
+            return (UNKNOWN_COMMAND, position)
+        if not current_user.csv_file_exists(last_csv_name):
+            return (f"Name {last_csv_name} doesn't exist", position)
+        all_csv_names.append(last_csv_name)
+    if last_csv_name == "" or last_csv_name == ".":
+        for user_name in current_user.all_csv_names():
+            all_csv_names.append(user_name)
+    return ("", position)
+
+def get_format(position: int, all_commands: list[str]) -> str:
+    current_format: str = ".csv"
+    if position < len(all_commands) and all_commands[position][:9] == "--format=":
+        current_format = all_commands[position][9:]
+        if current_format == "" or current_format == ".":
+            return ".csv"
+        if len(current_format) > 0 and current_format[0] != ".":
+            current_format = "." + current_format
+        if current_format != ".csv" and current_format != ".json":
+            return f"I\'m sorry, but I cannot work with the {current_format} format"
+    return current_format
+
+def save_current_user(root: Root, user_name: str, all_commands: list[str]) -> str:
+    current_user: User = root.get_user(user_name)
+    all_user_path: str = ROOT_PATH + "/" + user_name
+    all_csv_names: list[str] = []
+    position: int = 1
+    err, position = get_all_names(position, all_commands, all_csv_names, current_user)
+    if err != "":
+        return err
+    current_format: str = get_format(position, all_commands)
+    if current_format != ".csv" and current_format != ".json":
+        return current_format
+    for csv_name in all_csv_names:
+        all_csv_path: str = all_user_path + "/" + csv_name + current_format
+        if current_format == ".csv":
+            save_as_csv(current_user.get_csv(csv_name), all_csv_path)
+        else:
+            save_as_json(current_user.get_csv(csv_name), all_csv_path)
+    return ""
+
+def delete_current_user(root: Root, user_name: str, all_commands: list[str], real_del: bool = False) -> str:
+    current_user: User = root.get_user(user_name)
+    all_user_path: str = ROOT_PATH + "/" + user_name
+    all_csv_names: list[str] = []
+    position: int = 1
+    err, position = get_all_names(position, all_commands, all_csv_names, current_user)
+    if err != "":
+        return err
+    current_format: str = get_format(position, all_commands)
+    if current_format != ".csv" and current_format != ".json":
+        return current_format
+    if not real_del:
+        for csv_name in all_csv_names:
+            current_user.del_csv(csv_name)
+    else:
+        for csv_name in all_csv_names:
+            csv_path = all_user_path + "/" + csv_name + current_format
+            Path(csv_path).unlink(missing_ok=True)
+    return ""
+
 def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
     root: Root = Root()
     user_now: str = "sudo"
@@ -466,7 +608,56 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
     exit_words.add("q")
     while all_commands[0].lower() not in exit_words:
         prefix = ""
-        if len(all_commands) == 1:
+        if all_commands[0].lower() == "save":
+            if user_now != "":
+                prefix = save_current_user(root, user_now, all_commands)
+                if prefix == "":
+                    prefix = "Successful preservation"
+            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+                new_all_commands: list[str] = ["save", "--format=.csv"]
+                current_format: str = ".csv"
+                if len(all_commands) > 2 and all_commands[2][:9] == "--format=":
+                    current_format = all_commands[2][9:]
+                    if len(current_format) > 0 and current_format[0] != ".":
+                        current_format = "." + current_format
+                    if current_format == "" or current_format == ".":
+                        current_format = ".csv"
+                    if current_format != ".csv" and current_format != ".json":
+                        prefix = f"I\'m sorry, but I cannot work with the {current_format} format"
+                if prefix == "":
+                    new_all_commands[1] = "--format=" + current_format
+                    for user_name in root.all_user_names():
+                        prefix = save_current_user(root, user_name, new_all_commands)
+                    if prefix == "":
+                        prefix = "Successful preservation"
+            else:
+                prefix = UNKNOWN_COMMAND
+        elif all_commands[0].lower() == "delete":
+            if user_now != "":
+                prefix = delete_current_user(root, user_now, all_commands)
+                if prefix == "":
+                    prefix = "Successful deletion"
+            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+                new_all_commands: list[str] = ["delete"]
+                for user_name in root.all_user_names():
+                    prefix = delete_current_user(root, user_name, new_all_commands)
+                root.clear()
+                prefix = "Successful deletion"
+            else:
+                prefix = UNKNOWN_COMMAND
+        elif all_commands[0].lower() == "rdelete":
+            if user_now != "":
+                prefix = delete_current_user(root, user_now, all_commands, True)
+                if prefix == "":
+                    prefix = "Successful rdeletion"
+            elif len(all_commands) > 1 and all_commands[1].lower() == "all":
+                root_path: Path = Path(ROOT_PATH)
+                if root_path.exists():
+                    shutil.rmtree(str(root_path))
+                prefix = "Successful rdeletion"
+            else:
+                prefix = UNKNOWN_COMMAND
+        elif len(all_commands) == 1:
             if all_commands[0].lower() == "ls":
                 if user_now == "":
                    prefix = "\n".join(root.all_user_names())
@@ -555,7 +746,9 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                         prefix = NAME_EXISTS
                     else:
                         prefix = f"Add new csv file {all_csv_name} to the user {user_now}"
-        elif all_commands[0].lower == "key":
+            else:
+                prefix = UNKNOWN_COMMAND
+        elif all_commands[0].lower() == "key":
             sub = all_commands[1] if len(all_commands) > 1 else ""
             if user_now:
                 current_user = root.get_user(user_now)
@@ -576,10 +769,6 @@ def terminal(inp: TextIO = sys.stdin, output: TextIO = sys.stdout) -> None:
                 prefix = "Incorrect directory for the key command!"
         else:
             prefix = UNKNOWN_COMMAND
-
-
-
-
 
 
         write_into(output, user_now, prefix)
